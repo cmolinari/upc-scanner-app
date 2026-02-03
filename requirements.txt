@@ -1,0 +1,6 @@
+streamlit
+pyzbar
+Pillow
+requests
+gspread
+oauth2client
