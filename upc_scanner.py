@@ -1,12 +1,14 @@
 import streamlit as st
 from pyzbar.pyzbar import decode
-from PIL import Image, ImageOps
+import pytesseract
+from PIL import Image, ImageOps, ImageEnhance
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import re
 
 # --- CONFIGURATION ---
-SHEET_NAME = "My Collection" # Rename your Google Sheet to this!
+SHEET_NAME = "My Collection"
 
 # --- GOOGLE SHEETS SETUP ---
 def get_sheet_connection():
@@ -24,63 +26,67 @@ def save_to_sheet(car):
     if not sheet:
         return False, "❌ Error: Could not connect to Google Sheet."
     try:
-        # Check if we already have this UPC
-        # (Note: For Hot Wheels, you might want duplicates, but we'll flag them)
-        existing_upcs = sheet.col_values(4) # Column D is UPC
-        
-        # Formula for Image
+        # Row: [Name, Brand, Image, UPC, Model Code]
         image_formula = f'=IMAGE("{car["image"]}")' if car["image"] else ""
-        
-        # Row: [Name, Brand/Series, Image, UPC]
-        row = [car['title'], car['brand'], image_formula, car['upc']]
+        row = [car['title'], car['brand'], image_formula, car['upc'], car['model_code']]
         
         sheet.append_row(row, value_input_option='USER_ENTERED')
-        return True, f"✅ Parked '{car['title']}' in your garage!"
+        return True, f"✅ Parked '{car['title']}'!"
     except Exception as e:
         return False, f"❌ Cloud Error: {e}"
 
-# --- PRODUCT LOOKUP (UPC API) ---
-def get_toy_data(upc_code):
-    clean_upc = upc_code.strip()
-    
-    # We use the free UPCitemdb API
+# --- SEARCH LOGIC ---
+def lookup_upc(upc_code):
+    """Checks UPC database."""
     url = "https://api.upcitemdb.com/prod/trial/lookup"
-    params = {"upc": clean_upc}
-    
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params={"upc": upc_code})
         data = response.json()
-        
         if "items" in data and len(data["items"]) > 0:
             item = data["items"][0]
             return {
-                "title": item.get("title", "Unknown Hot Wheels"),
-                "brand": item.get("brand", "Mattel"),
+                "title": item.get("title", ""),
+                "brand": item.get("brand", "Hot Wheels"),
                 "image": item.get("images", [""])[0] if item.get("images") else "",
-                "upc": clean_upc
+                "upc": upc_code,
+                "model_code": ""
             }
-        else:
-            # Fallback for when API finds nothing
-            return {
-                "title": "Unknown Hot Wheels (Enter Name)",
-                "brand": "Hot Wheels",
-                "image": "",
-                "upc": clean_upc
-            }
-    except Exception as e:
-        st.error(f"API Error: {e}")
-        return None
+    except:
+        pass
+    # Fallback if not found
+    return {"title": "", "brand": "Hot Wheels", "image": "", "upc": upc_code, "model_code": ""}
+
+def extract_model_code(image):
+    """OCR to find patterns like JBB49-N7C5"""
+    # 1. Pre-process (Make it black and white, high contrast)
+    gray = ImageOps.grayscale(image)
+    enhancer = ImageEnhance.Contrast(gray)
+    clean_img = enhancer.enhance(2.5) # Crank up contrast
+    
+    # 2. Read text
+    text = pytesseract.image_to_string(clean_img)
+    
+    # 3. Regex Pattern: 5 alphanumeric, hyphen, 4 alphanumeric
+    # Looks for: JBB49-N7C5 or similar
+    pattern = r'[A-Z0-9]{5}-[A-Z0-9]{4}'
+    match = re.search(pattern, text)
+    
+    if match:
+        return match.group(0)
+    return None
 
 # --- APP INTERFACE ---
-st.title("🏎️ Hot Wheels Scanner")
+st.title("🏎️ Hybrid HW Scanner")
 
 if 'current_car' not in st.session_state:
-    st.session_state['current_car'] = None
+    st.session_state['current_car'] = {
+        "title": "", "brand": "Hot Wheels", "image": "", "upc": "", "model_code": ""
+    }
 
-st.write("### Scan Card Back")
-st.info("Upload photo of the Barcode")
+st.write("### 1. Scan Car")
+st.info("Upload back of card. We look for Barcodes AND Codes (e.g. JBB49-N7C5)")
 
-uploaded_file = st.file_uploader("Upload Image", key="hw_uploader")
+uploaded_file = st.file_uploader("Upload Image", key="hybrid_uploader")
 
 if uploaded_file:
     try:
@@ -91,48 +97,70 @@ if uploaded_file:
         
         st.image(image, caption="Scanning...", width=200)
         
+        # A. TRY BARCODE
         decoded_objects = decode(image)
         if decoded_objects:
-            upc = decoded_objects[0].data.decode("utf-8")
-            st.success(f"UPC Found: {upc}")
+            found_upc = decoded_objects[0].data.decode("utf-8")
+            st.success(f"🔹 Barcode: {found_upc}")
             
-            if st.button(f"🔍 Look up Car"):
-                with st.spinner('Checking Database...'):
-                    car_info = get_toy_data(upc)
-                    st.session_state['current_car'] = car_info
-        else:
-            st.warning("❌ No barcode detected.")
+            # Auto-lookup UPC
+            with st.spinner('Checking UPC DB...'):
+                api_result = lookup_upc(found_upc)
+                st.session_state['current_car'].update(api_result)
+
+        # B. TRY TEXT CODE (OCR)
+        with st.spinner('Reading text codes...'):
+            found_code = extract_model_code(image)
+            if found_code:
+                st.success(f"🔹 Model Code: {found_code}")
+                st.session_state['current_car']['model_code'] = found_code
+            else:
+                st.caption("No 'XXXXX-XXXX' code found in text.")
+
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- DISPLAY & EDIT & SAVE ---
-if st.session_state['current_car']:
-    car = st.session_state['current_car']
-    
-    st.divider()
-    st.subheader("Car Details")
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        if car['image']:
-            st.image(car['image'])
-        else:
-            st.info("No image found")
-            
-    with col2:
-        # EDITABLE FIELDS (Crucial for Hot Wheels)
-        new_title = st.text_input("Car Name", value=car['title'])
-        new_brand = st.text_input("Series / Brand", value=car['brand'])
-        
-        # Update our session object if user types something new
-        car['title'] = new_title
-        car['brand'] = new_brand
+# --- DISPLAY & EDIT ---
+car = st.session_state['current_car']
 
-        if st.button("💾 Add to Collection"):
+st.divider()
+st.subheader("Car Details")
+
+# EDITABLE FIELDS
+col1, col2 = st.columns([1, 2])
+with col1:
+    if car['image']:
+        st.image(car['image'])
+    else:
+        st.caption("No Image")
+
+with col2:
+    # If we found a Model Code but no Title, offer a Google Search link
+    if car['model_code'] and not car['title']:
+        st.info(f"💡 Found Code **{car['model_code']}** but no Name.")
+        search_url = f"https://www.google.com/search?q=hot+wheels+{car['model_code']}"
+        st.markdown(f"[👉 Click to ID this car on Google]({search_url})")
+
+    new_title = st.text_input("Car Name", value=car['title'])
+    new_brand = st.text_input("Series", value=car['brand'])
+    new_code = st.text_input("Model Code", value=car['model_code'])
+    
+    # Update state
+    car['title'] = new_title
+    car['brand'] = new_brand
+    car['model_code'] = new_code
+
+    if st.button("💾 Add to Collection"):
+        if not car['title']:
+            st.error("Please enter a Car Name first!")
+        else:
             success, msg = save_to_sheet(car)
             if success:
                 st.balloons()
                 st.success(msg)
-                st.session_state['current_car'] = None
+                # Reset
+                st.session_state['current_car'] = {
+                    "title": "", "brand": "Hot Wheels", "image": "", "upc": "", "model_code": ""
+                }
             else:
                 st.warning(msg)
