@@ -6,7 +6,6 @@ import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import re
-import base64
 
 # --- CONFIGURATION ---
 SHEET_NAME = "My Collection"
@@ -34,16 +33,46 @@ def save_to_sheet(car):
     except Exception as e:
         return False, f"❌ Cloud Error: {e}"
 
-# --- URL GENERATOR (No Scraping) ---
-def generate_collecthw_url(code):
-    """Generates the search URL without visiting it (avoids 403 block)"""
+# --- OFFICIAL WIKI API (The "Secret Door") ---
+def search_wiki_api(code):
+    """Asks the Wiki API directly for the page title. No scraping."""
+    
+    # Clean the code (JBC19-N7C6 -> "JBC19")
+    clean_code = code.split("-")[0].strip()
+    
+    # The API Endpoint
+    url = "https://hotwheels.fandom.com/api.php"
+    
+    # The parameters asking for a search
+    params = {
+        "action": "query",
+        "format": "json",
+        "list": "search",
+        "srsearch": clean_code,  # What we are looking for
+        "srlimit": 1             # Just give us the #1 best match
+    }
+    
     try:
-        clean_code = code.split("-")[0].strip()
-        encoded_bytes = base64.b64encode(clean_code.encode("utf-8"))
-        encoded_str = encoded_bytes.decode("utf-8")
-        return f"https://collecthw.com/hw/search/{encoded_str}"
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        # Dig into the JSON response
+        if "query" in data and "search" in data["query"]:
+            results = data["query"]["search"]
+            if len(results) > 0:
+                # The 'title' of the page is usually the car name!
+                # e.g. "Mazda Savanna RX-7 FC3S (2025)"
+                title = results[0]["title"]
+                
+                # Construct a clean link to that page
+                # Wiki titles use underscores instead of spaces in URLs
+                wiki_link = f"https://hotwheels.fandom.com/wiki/{title.replace(' ', '_')}"
+                
+                return title, wiki_link
     except:
-        return None
+        pass
+        
+    return None, None
 
 # --- UPC LOGIC ---
 def lookup_upc(upc_code):
@@ -69,7 +98,6 @@ def extract_model_code(image):
     clean_img = enhancer.enhance(2.5)
     text = pytesseract.image_to_string(clean_img)
     
-    # Pattern: 5 chars, dash, 4 chars (e.g. JBC19-N7C6)
     pattern = r'[A-Z0-9]{5}-[A-Z0-9]{4}'
     match = re.search(pattern, text)
     if match:
@@ -77,15 +105,15 @@ def extract_model_code(image):
     return None
 
 # --- APP INTERFACE ---
-st.title("🏎️ HW Quick-Link Scanner")
+st.title("🏎️ HW Bot Scanner (API Edition)")
 
 if 'current_car' not in st.session_state:
     st.session_state['current_car'] = {
         "title": "", "brand": "Hot Wheels", "image": "", "upc": "", "model_code": ""
     }
 
-st.info("Upload card back. We generate the database link for you.")
-uploaded_file = st.file_uploader("Upload Image", key="final_uploader")
+st.info("Upload card back. We use the Official Wiki API to find the name.")
+uploaded_file = st.file_uploader("Upload Image", key="api_uploader")
 
 if uploaded_file:
     try:
@@ -110,11 +138,18 @@ if uploaded_file:
             st.success(f"🔹 Found Code: {found_code}")
             st.session_state['current_car']['model_code'] = found_code
             
-            # GENERATE LINK
-            db_link = generate_collecthw_url(found_code)
-            if db_link:
-                st.markdown(f"### 👉 [Identify on CollectHW]({db_link})")
-                st.caption("Click above to see the car name, then type it below.")
+            # 3. ASK THE WIKI API
+            if not st.session_state['current_car']['title']:
+                with st.spinner(f"Asking Wiki Database for {found_code}..."):
+                    wiki_title, wiki_link = search_wiki_api(found_code)
+                    
+                    if wiki_title:
+                        st.balloons()
+                        st.success(f"✨ Identified: {wiki_title}")
+                        st.session_state['current_car']['title'] = wiki_title
+                        st.markdown(f"[View Wiki Page]({wiki_link})")
+                    else:
+                        st.warning("Code valid, but no exact Wiki match found.")
 
     except Exception as e:
         st.error(f"Error: {e}")
