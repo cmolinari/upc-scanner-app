@@ -7,7 +7,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import re
 from bs4 import BeautifulSoup
-import base64  # <--- NEW TOOL FOR THE ENCODING
+import base64
 
 # --- CONFIGURATION ---
 SHEET_NAME = "My Collection"
@@ -35,44 +35,44 @@ def save_to_sheet(car):
     except Exception as e:
         return False, f"❌ Cloud Error: {e}"
 
-# --- NEW COLLECTHW SCRAPER ---
+# --- IMPROVED SCRAPER ---
 def search_collecthw(code):
-    """Encodes JBC19 -> SkJDMTk= and searches collecthw.com"""
-    
-    # 1. Clean the code (take only the first part before dash)
-    # Ex: JBC19-N7C6 -> JBC19
+    # 1. Clean & Encode
     clean_code = code.split("-")[0].strip()
-    
-    # 2. Convert to Base64
-    # We must encode to bytes, then base64, then back to string
     encoded_bytes = base64.b64encode(clean_code.encode("utf-8"))
     encoded_str = encoded_bytes.decode("utf-8")
     
-    # 3. Build URL
     url = f"https://collecthw.com/hw/search/{encoded_str}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # DEBUG: Show user the URL we are trying
+    st.info(f"Generated URL: {url}")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 4. Find the result in their HTML
-            # CollectHW usually puts results in a table or card. 
-            # We look for the first link inside the search results.
-            # (Structure: <ul class="list-group"> ... <a href="...">Car Name</a>)
+            # STRATEGY CHANGE: Look for ANY link containing '/hw/item/'
+            # This is safer than looking for specific list classes
+            car_link = soup.find("a", href=re.compile(r"/hw/item/"))
             
-            results_list = soup.find("ul", class_="list-group")
-            if results_list:
-                first_result = results_list.find("a")
-                if first_result:
-                    # Clean up the name (remove extra spaces)
-                    full_name = " ".join(first_result.get_text().split())
-                    return full_name, url
-    except:
-        pass
+            if car_link:
+                # Found a link to a car page! 
+                # The text inside usually contains the name.
+                full_name = " ".join(car_link.get_text().split())
+                return full_name, url
+            else:
+                st.warning("Connected to site, but found no results on page.")
+        else:
+            st.error(f"Website returned Error Code: {response.status_code}")
+    except Exception as e:
+        st.error(f"Scraping Error: {e}")
     
-    return None, None
+    return None, url
 
 # --- SEARCH LOGIC ---
 def lookup_upc(upc_code):
@@ -98,6 +98,7 @@ def extract_model_code(image):
     clean_img = enhancer.enhance(2.5)
     text = pytesseract.image_to_string(clean_img)
     
+    # Pattern: 5 alphanumeric, dash, 4 alphanumeric
     pattern = r'[A-Z0-9]{5}-[A-Z0-9]{4}'
     match = re.search(pattern, text)
     if match:
@@ -105,14 +106,14 @@ def extract_model_code(image):
     return None
 
 # --- APP INTERFACE ---
-st.title("🏎️ HW Scanner (Base64 Edition)")
+st.title("🏎️ HW Scanner (Debug V3)")
 
 if 'current_car' not in st.session_state:
     st.session_state['current_car'] = {
         "title": "", "brand": "Hot Wheels", "image": "", "upc": "", "model_code": ""
     }
 
-st.info("Upload card back. We decode JBC19 -> Base64 to search CollectHW.")
+st.info("Upload card back. Debug info will appear below.")
 uploaded_file = st.file_uploader("Upload Image", key="hybrid_uploader")
 
 if uploaded_file:
@@ -138,17 +139,19 @@ if uploaded_file:
             st.success(f"🔹 Found Code: {found_code}")
             st.session_state['current_car']['model_code'] = found_code
             
-            # 3. SEARCH COLLECTHW (The New Logic)
+            # 3. SEARCH COLLECTHW
             if not st.session_state['current_car']['title']:
-                with st.spinner(f"Decoding {found_code} & Searching Database..."):
+                with st.spinner(f"Searching Database..."):
                     hw_name, link = search_collecthw(found_code)
                     if hw_name:
                         st.balloons()
                         st.success(f"✨ Identified: {hw_name}")
                         st.session_state['current_car']['title'] = hw_name
-                        st.markdown(f"[View on CollectHW]({link})")
+                        st.markdown(f"[👉 Verify on CollectHW]({link})")
                     else:
-                        st.warning("Code found, but no match in database.")
+                        st.warning("Auto-ID failed.")
+                        if link:
+                            st.markdown(f"**Try clicking here:** [Open Search Results]({link})")
 
     except Exception as e:
         st.error(f"Error: {e}")
